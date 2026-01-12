@@ -6,7 +6,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-// StreamViewModel - DAT Camera Streaming API Demo
+// StreamViewModel - DAT Camera Streaming API Demo with LiveKit Integration
 //
 // This ViewModel demonstrates the DAT Camera Streaming APIs for:
 // - Creating and managing stream sessions with wearable devices
@@ -14,6 +14,7 @@
 // - Capturing photos during streaming sessions
 // - Handling different video qualities and formats
 // - Processing raw video data (I420 -> NV21 conversion)
+// - Streaming video to LiveKit WebRTC server for AI agent interaction
 
 package com.meta.wearable.dat.externalsampleapps.cameraaccess.stream
 
@@ -25,6 +26,7 @@ import android.graphics.ImageFormat
 import android.graphics.Matrix
 import android.graphics.Rect
 import android.graphics.YuvImage
+import android.hardware.camera2.CameraCharacteristics
 import android.util.Log
 import androidx.core.content.FileProvider
 import androidx.exifinterface.media.ExifInterface
@@ -41,6 +43,10 @@ import com.meta.wearable.dat.camera.types.VideoFrame
 import com.meta.wearable.dat.camera.types.VideoQuality
 import com.meta.wearable.dat.core.Wearables
 import com.meta.wearable.dat.core.selectors.DeviceSelector
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.livekit.DebugLogger
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.livekit.LiveKitConnectionState
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.livekit.LiveKitManager
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.livekit.LiveKitUiState
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.wearables.WearablesViewModel
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
@@ -62,6 +68,7 @@ class StreamViewModel(
   companion object {
     private const val TAG = "StreamViewModel"
     private val INITIAL_STATE = StreamUiState()
+    private val INITIAL_LIVEKIT_STATE = LiveKitUiState()
   }
 
   private val deviceSelector: DeviceSelector = wearablesViewModel.deviceSelector
@@ -70,11 +77,19 @@ class StreamViewModel(
   private val _uiState = MutableStateFlow(INITIAL_STATE)
   val uiState: StateFlow<StreamUiState> = _uiState.asStateFlow()
 
+  // LiveKit state
+  private val _liveKitState = MutableStateFlow(INITIAL_LIVEKIT_STATE)
+  val liveKitState: StateFlow<LiveKitUiState> = _liveKitState.asStateFlow()
+  
+  // LiveKit Manager
+  val liveKitManager = LiveKitManager(application)
+
   private val streamTimer = StreamTimer()
 
   private var videoJob: Job? = null
   private var stateJob: Job? = null
   private var timerJob: Job? = null
+  private var liveKitStateJob: Job? = null
 
   init {
     // Collect timer state
@@ -100,6 +115,53 @@ class StreamViewModel(
             }
           }
         }
+    
+    // Collect LiveKit state
+    liveKitStateJob = viewModelScope.launch {
+      launch {
+        liveKitManager.connectionState.collect { state ->
+          _liveKitState.update { it.copy(connectionState = state) }
+          // Auto-show debug dialog on error
+          if (state == LiveKitConnectionState.ERROR) {
+            _liveKitState.update { 
+              it.copy(
+                isDebugDialogVisible = true,
+                debugInfo = liveKitManager.getLastDebugInfo(),
+                phoneIpAddress = liveKitManager.getDeviceIpAddress()
+              )
+            }
+          }
+        }
+      }
+      launch {
+        liveKitManager.errorMessage.collect { error ->
+          _liveKitState.update { it.copy(errorMessage = error) }
+        }
+      }
+      launch {
+        liveKitManager.remoteAudioTrack.collect { track ->
+          _liveKitState.update { it.copy(hasRemoteAudioTrack = track != null) }
+        }
+      }
+      launch {
+        liveKitManager.remoteVideoTrack.collect { track ->
+          _liveKitState.update { it.copy(remoteVideoTrack = track) }
+        }
+      }
+      launch {
+        liveKitManager.debugInfo.collect { info ->
+          _liveKitState.update { it.copy(debugInfo = info) }
+        }
+      }
+      launch {
+        liveKitManager.agentModeActive.collect { active ->
+          _liveKitState.update { it.copy(agentModeActive = active) }
+        }
+      }
+    }
+    
+    // Initialize phone IP
+    _liveKitState.update { it.copy(phoneIpAddress = liveKitManager.getDeviceIpAddress()) }
   }
 
   fun startStream() {
@@ -139,6 +201,11 @@ class StreamViewModel(
     streamSession = null
     streamTimer.stopTimer()
     _uiState.update { INITIAL_STATE }
+    
+    // Also stop LiveKit publishing
+    liveKitManager.stopPublishingVideo()
+    liveKitManager.stopPublishingAudio()
+    _liveKitState.update { it.copy(isPublishingVideo = false, isPublishingAudio = false) }
   }
 
   fun capturePhoto() {
@@ -216,7 +283,193 @@ class StreamViewModel(
     streamTimer.resetTimer()
   }
 
+  // =====================================================
+  // LiveKit Integration Methods
+  // =====================================================
+  
+  /**
+   * Update LiveKit server configuration
+   */
+  fun updateLiveKitConfig(serverUrl: String, roomName: String, participantName: String) {
+    _liveKitState.update { 
+      it.copy(
+        serverUrl = serverUrl,
+        roomName = roomName,
+        participantName = participantName
+      )
+    }
+  }
+  
+  /**
+   * Show/hide LiveKit config dialog
+   */
+  fun showLiveKitConfigDialog() {
+    _liveKitState.update { it.copy(isConfigDialogVisible = true) }
+  }
+  
+  fun hideLiveKitConfigDialog() {
+    _liveKitState.update { it.copy(isConfigDialogVisible = false) }
+  }
+  
+  /**
+   * Show/hide debug dialog
+   */
+  fun showDebugDialog() {
+    _liveKitState.update { 
+      it.copy(
+        isDebugDialogVisible = true,
+        debugInfo = liveKitManager.getLastDebugInfo(),
+        phoneIpAddress = liveKitManager.getDeviceIpAddress()
+      )
+    }
+  }
+  
+  fun hideDebugDialog() {
+    _liveKitState.update { it.copy(isDebugDialogVisible = false) }
+  }
+  
+  /**
+   * Connect to LiveKit server
+   */
+  fun connectToLiveKit() {
+    val state = _liveKitState.value
+    
+    // Configure LiveKit with default dev credentials
+    liveKitManager.configure(
+      serverUrl = state.serverUrl,
+      apiKey = "devkey",
+      apiSecret = "secret_dev_key_change_in_production"
+    )
+    
+    viewModelScope.launch {
+      val connected = liveKitManager.connect(
+        roomName = state.roomName,
+        participantName = state.participantName
+      )
+      
+      if (connected) {
+        Log.d(TAG, "Connected to LiveKit")
+        // Don't automatically start publishing - let user choose which video source
+      } else {
+        Log.e(TAG, "Failed to connect to LiveKit")
+      }
+    }
+  }
+  
+  /**
+   * Disconnect from LiveKit
+   */
+  fun disconnectFromLiveKit() {
+    liveKitManager.disconnect()
+    _liveKitState.update { 
+      it.copy(
+        isPublishingVideo = false,
+        isPublishingAudio = false
+      )
+    }
+  }
+  
+  /**
+   * Start publishing video to LiveKit
+   */
+  fun startPublishingVideo() {
+    viewModelScope.launch {
+      val success = liveKitManager.startPublishingVideo(
+        width = 640,
+        height = 480,
+        fps = 24
+      )
+      _liveKitState.update { it.copy(isPublishingVideo = success) }
+    }
+  }
+  
+  /**
+   * Stop publishing video to LiveKit
+   */
+  fun stopPublishingVideo() {
+    liveKitManager.stopPublishingVideo()
+    _liveKitState.update { it.copy(isPublishingVideo = false) }
+  }
+  
+  /**
+   * Start publishing audio to LiveKit
+   */
+  fun startPublishingAudio() {
+    viewModelScope.launch {
+      val success = liveKitManager.startPublishingAudio()
+      _liveKitState.update { it.copy(isPublishingAudio = success) }
+    }
+  }
+  
+  /**
+   * Stop publishing audio to LiveKit
+   */
+  fun stopPublishingAudio() {
+    liveKitManager.stopPublishingAudio()
+    _liveKitState.update { it.copy(isPublishingAudio = false) }
+  }
+  
+  /**
+   * Toggle audio mute
+   */
+  fun toggleAudioMute() {
+    val newMuted = !_liveKitState.value.isAudioMuted
+    liveKitManager.setAudioMuted(newMuted)
+    _liveKitState.update { it.copy(isAudioMuted = newMuted) }
+  }
+  
+  /**
+   * Start publishing phone camera video to LiveKit
+   */
+  fun startPublishingPhoneCamera(cameraFacing: Int = CameraCharacteristics.LENS_FACING_BACK) {
+    viewModelScope.launch {
+      val success = liveKitManager.startPublishingPhoneCamera(cameraFacing)
+      _liveKitState.update { 
+        it.copy(
+          isPublishingPhoneCamera = success,
+          phoneCameraFacing = if (success) cameraFacing else it.phoneCameraFacing
+        ) 
+      }
+    }
+  }
+  
+  /**
+   * Stop publishing phone camera video to LiveKit
+   */
+  fun stopPublishingPhoneCamera() {
+    liveKitManager.stopPublishingPhoneCamera()
+    _liveKitState.update { it.copy(isPublishingPhoneCamera = false) }
+  }
+  
+  /**
+   * Switch phone camera between front and back
+   */
+  fun switchPhoneCamera() {
+    viewModelScope.launch {
+      val success = liveKitManager.switchPhoneCamera()
+      if (success) {
+        val newFacing = liveKitManager.getCurrentCameraFacing()
+        _liveKitState.update { 
+          it.copy(phoneCameraFacing = newFacing) 
+        }
+      }
+    }
+  }
+  
+  /**
+   * Toggle agent mode
+   */
+  fun toggleAgentMode() {
+    viewModelScope.launch {
+      liveKitManager.toggleAgentMode()
+      // State will be updated via StateFlow collection
+    }
+  }
+
   private fun handleVideoFrame(videoFrame: VideoFrame) {
+    // #region agent log
+    DebugLogger.log("A", "StreamViewModel.handleVideoFrame", "Frame received", mapOf("isPublishingVideo" to _liveKitState.value.isPublishingVideo, "isPublishingPhoneCamera" to _liveKitState.value.isPublishingPhoneCamera))
+    // #endregion
     // VideoFrame contains raw I420 video data in a ByteBuffer
     val buffer = videoFrame.buffer
     val dataSize = buffer.remaining()
@@ -239,6 +492,17 @@ class StreamViewModel(
 
     val bitmap = BitmapFactory.decodeByteArray(out, 0, out.size)
     _uiState.update { it.copy(videoFrame = bitmap) }
+    
+    // Send frame to LiveKit if publishing
+    // #region agent log
+    DebugLogger.log("A", "StreamViewModel.handleVideoFrame.sendCheck", "Checking send", mapOf("isPublishingVideo" to _liveKitState.value.isPublishingVideo, "bitmapNull" to (bitmap == null)))
+    // #endregion
+    if (_liveKitState.value.isPublishingVideo && bitmap != null) {
+      // #region agent log
+      DebugLogger.log("A", "StreamViewModel.handleVideoFrame.sending", "Sending frame to LiveKit", emptyMap())
+      // #endregion
+      liveKitManager.sendVideoFrame(bitmap)
+    }
   }
 
   // Convert I420 (YYYYYYYY:UUVV) to NV21 (YYYYYYYY:VUVU)
@@ -355,7 +619,9 @@ class StreamViewModel(
     stopStream()
     stateJob?.cancel()
     timerJob?.cancel()
+    liveKitStateJob?.cancel()
     streamTimer.cleanup()
+    liveKitManager.cleanup()
   }
 
   class Factory(

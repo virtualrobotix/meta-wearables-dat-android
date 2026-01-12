@@ -19,13 +19,20 @@ package com.meta.wearable.dat.externalsampleapps.cameraaccess
 
 import android.Manifest.permission.BLUETOOTH
 import android.Manifest.permission.BLUETOOTH_CONNECT
+import android.Manifest.permission.BLUETOOTH_SCAN
+import android.Manifest.permission.CAMERA
 import android.Manifest.permission.INTERNET
+import android.Manifest.permission.RECORD_AUDIO
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions
 import androidx.activity.viewModels
+import androidx.core.content.ContextCompat
 import com.meta.wearable.dat.core.Wearables
 import com.meta.wearable.dat.core.types.Permission
 import com.meta.wearable.dat.core.types.PermissionStatus
@@ -39,8 +46,16 @@ import kotlinx.coroutines.sync.withLock
 
 class MainActivity : ComponentActivity() {
   companion object {
-    // Required Android permissions for the DAT SDK to function properly
-    val PERMISSIONS: Array<String> = arrayOf(BLUETOOTH, BLUETOOTH_CONNECT, INTERNET)
+    private const val TAG = "MainActivity"
+    
+    // Required Android permissions for the DAT SDK and LiveKit WebRTC
+    val PERMISSIONS: Array<String> = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+      // Android 12+ requires BLUETOOTH_SCAN and BLUETOOTH_CONNECT
+      arrayOf(BLUETOOTH_CONNECT, BLUETOOTH_SCAN, RECORD_AUDIO, CAMERA)
+    } else {
+      // Older Android versions
+      arrayOf(BLUETOOTH, RECORD_AUDIO, CAMERA)
+    }
   }
 
   val viewModel: WearablesViewModel by viewModels()
@@ -67,19 +82,30 @@ class MainActivity : ComponentActivity() {
     }
   }
 
+  private var permissionLauncher = registerForActivityResult(RequestMultiplePermissions()) { permissionsResult ->
+    Log.d(TAG, "Permissions result: $permissionsResult")
+    
+    // Check if at least Bluetooth permission is granted
+    val bluetoothGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+      permissionsResult[BLUETOOTH_CONNECT] == true
+    } else {
+      permissionsResult[BLUETOOTH] == true
+    }
+    
+    if (bluetoothGranted) {
+      initializeWearables()
+    } else {
+      viewModel.setRecentError(
+          "Permesso Bluetooth necessario. Vai in Impostazioni > App > CameraAccess > Permessi"
+      )
+      // Still try to initialize - some features may work
+      initializeWearables()
+    }
+  }
+
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     enableEdgeToEdge()
-
-    // First, ensure the app has necessary Android permissions
-    checkPermissions {
-      // Initialize the DAT SDK once the permissions are granted
-      // This is REQUIRED before using any Wearables APIs
-      Wearables.initialize(this)
-
-      // Start observing Wearables state after SDK is initialized
-      viewModel.startMonitoring()
-    }
 
     setContent {
       CameraAccessScaffold(
@@ -87,19 +113,32 @@ class MainActivity : ComponentActivity() {
           onRequestWearablesPermission = ::requestWearablesPermission,
       )
     }
-  }
 
-  fun checkPermissions(onPermissionsGranted: () -> Unit) {
-    registerForActivityResult(RequestMultiplePermissions()) { permissionsResult ->
-          val granted = permissionsResult.entries.all { it.value }
-          if (granted) {
-            onPermissionsGranted()
-          } else {
-            viewModel.setRecentError(
-                "Allow All Permissions (Bluetooth, Bluetooth Connect, Internet)"
-            )
-          }
-        }
-        .launch(PERMISSIONS)
+    // Check if permissions are already granted
+    if (hasRequiredPermissions()) {
+      Log.d(TAG, "Permissions already granted")
+      initializeWearables()
+    } else {
+      Log.d(TAG, "Requesting permissions")
+      permissionLauncher.launch(PERMISSIONS)
+    }
+  }
+  
+  private fun hasRequiredPermissions(): Boolean {
+    return PERMISSIONS.all { permission ->
+      ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
+    }
+  }
+  
+  private fun initializeWearables() {
+    try {
+      Log.d(TAG, "Initializing Wearables SDK")
+      Wearables.initialize(this)
+      viewModel.startMonitoring()
+      Log.d(TAG, "Wearables SDK initialized successfully")
+    } catch (e: Exception) {
+      Log.e(TAG, "Failed to initialize Wearables SDK", e)
+      viewModel.setRecentError("Errore inizializzazione: ${e.message}")
+    }
   }
 }

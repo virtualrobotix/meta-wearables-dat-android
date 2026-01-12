@@ -38,12 +38,20 @@ dependencyResolutionManagement {
   repositories {
     google()
     mavenCentral()
+    // Meta Wearables DAT SDK
     maven {
       url = uri("https://maven.pkg.github.com/facebook/meta-wearables-dat-android")
       credentials {
         username = "" // not needed
         password = System.getenv("GITHUB_TOKEN") ?: localProperties.getProperty("github_token")
       }
+      content {
+        includeGroup("com.meta.wearable")
+      }
+    }
+    // JitPack for LiveKit and other dependencies
+    maven {
+      url = uri("https://jitpack.io")
     }
   }
 }
